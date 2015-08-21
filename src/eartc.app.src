@@ -1,0 +1,15 @@
+{application, 'eartc',
+ [{description, "Port interface to Approximate-Replay Trace Compiler"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {applications,
+   [kernel,
+    stdlib
+   ]},
+  {env,[]},
+  {modules, []},
+
+  {contributors, []},
+  {licenses, []},
+  {links, []}
+ ]}.
