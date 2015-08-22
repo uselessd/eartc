@@ -1,7 +1,11 @@
 -module('eartc').
 
 %% API exports
--export([init_listing/2, trace/2, flush/1]).
+-export([init_listing/2, 
+         trace/2, 
+         compile/1, 
+         replay/1, 
+         flush/1]).
 
 -define(PREFIX, "/usr/local/bin/").
 -define(EARTC_DIR, "/usr/share/eartc/").
@@ -17,32 +21,43 @@
 %%====================================================================
 
 init_listing(Program, Dirs) ->
-   ListingDir = file:make_dir(lists:concat([?EARTC_DIR, Program])),
-   Port = vrunfile(?GENINIT, Dirs, 
-                  lists:concat(
-                  [?EARTC_DIR, Program, "/", Program, ".init"])
-                  ),
+   file:make_dir(new_trace_dir(Program)),
+   vrunfile(?GENINIT, Dirs, 
+            init_listing_string(Program)),
    ok.
 
 trace(Program, Args) ->
-   Port = cmdpp(?STRACE_ARTC ++ 
+   cmdpp(?STRACE_ARTC ++ 
                   " -o" ++
-                  lists:concat(
-                  [" ", ?EARTC_DIR, filename:basename(Program), "/", 
-                  filename:basename(Program), ".strace"]) ++
-                  " " ++ string:join([Program, Args], " ")),
-   ok.
+                  strace_string(Program) ++
+                  " " ++ string:join([Program, Args], " ")).
 
 compile(Trace) ->
-   ok.
+   cmdpp(
+   string:join([?ARTC, "--strace", 
+               strace_string(Trace), 
+               init_listing_string(Trace),
+               bench_dir_string(Trace)], " ")
+   ),
+   cmdpp(
+   string:join([?MAKE, "-C", bench_dir_string(Trace)], " ")
+   ).
 
 replay(Trace) ->
-   ok.
+   case filelib:is_file(bench_shared_object(Trace)) of
+      true ->
+         vrunfile(?ARTRUN, ["-d", "fds,paths,aio,threads", bench_shared_object(Trace),
+                      new_trace_dir(Trace)],
+                      new_replay_file(Trace)),
+         ok;
+      false ->
+         io:fwrite("Warning: No ARTC-generated shared object found.~n", [])
+   end.
 
-flush(Dir) ->
+flush(Dir) when Dir =/= [all] ->
    del_dir(filelib:wildcard(?EARTC_DIR ++ Dir)),
    ok;
-flush(Dir) when Dir =:= everything -> %% {error, enoent}
+flush(all) ->
    del_dir(lists:reverse(filelib:wildcard(?EARTC_DIR ++ "*" ++ "*"))),
    ok.
 
@@ -50,6 +65,30 @@ flush(Dir) when Dir =:= everything -> %% {error, enoent}
 %% Internal functions
 %% Some adapted from nerves-utils
 %%====================================================================
+
+init_listing_string(Program) ->
+   M = lists:concat([?EARTC_DIR, filename:basename(Program), "/", 
+                     filename:basename(Program), ".init"]),
+   M.
+   
+strace_string(Program) ->
+   N = lists:concat([" ", ?EARTC_DIR, filename:basename(Program), "/", 
+                     filename:basename(Program), ".strace"]),
+   N.
+   
+new_trace_dir(Program) ->
+   O = lists:concat([?EARTC_DIR, filename:basename(Program)]),
+   O.
+   
+new_replay_file(Program) ->
+   string:join([?EARTC_DIR, Program, "/", Program, ".replay.",
+                integer_to_list(os:system_time())], "").
+
+bench_dir_string(Program) ->
+   string:join([?EARTC_DIR, Program, "/", Program, ".bench.d"], "").
+   
+bench_shared_object(Program) ->
+   string:join([?EARTC_DIR, Program, "/", Program, ".bench.d/", "bench.so"], "").
 
 del_dir(Dir) ->
    lists:foreach(fun(D) ->
@@ -73,42 +112,6 @@ del_all_files([Dir | T], EmptyDirs) ->
                          ok = file:delete(F)
                  end, Files),
    del_all_files(T ++ Dirs, [Dir | EmptyDirs]).
-
-run(Executable) ->
-    run(Executable, [], []).
-
-run(Executable, Args) ->
-    run(Executable, Args, []).
-
-run(Executable, Args, Input) ->
-    case os:find_executable(Executable) of
-      false ->
-         exit(enoent);
-      FoundExecutable ->
-         Port = open_port({spawn_executable, FoundExecutable},
-                  [exit_status, {args, Args}, stderr_to_stdout]),
-         Port ! {self(), {command, Input}},
-         loop_till_done(Port, <<>>)
-    end.
-    
-runnoloop(Executable, Args) ->
-    case os:find_executable(Executable) of
-      false ->
-         exit(enoent);
-      FoundExecutable ->
-         open_port({spawn_executable, FoundExecutable},
-                  [exit_status, {args, Args}, stderr_to_stdout])
-    end.
-
-vrun(Executable, Args) ->
-    case os:find_executable(Executable) of
-      false ->
-         exit(enoent);
-      FoundExecutable ->
-         Port = open_port({spawn_executable, FoundExecutable},
-                  [exit_status, {args, Args}, stderr_to_stdout]),
-         verbose_loop_till_done(Port)
-    end.
     
 vrunfile(Executable, Args, File) ->
     case os:find_executable(Executable) of
@@ -119,36 +122,12 @@ vrunfile(Executable, Args, File) ->
                   [exit_status, {args, Args}, stderr_to_stdout]),
          verbose_loop_till_done_file(File, Port)
     end.
-
-loop_till_done(Port, Data) ->
-    receive
-      {Port, {data, NewData}} ->
-         BinaryNewData = list_to_binary(NewData),
-         ConcatenatedData = <<Data/binary, BinaryNewData/binary>>,
-         loop_till_done(Port, ConcatenatedData);
-      {Port, {exit_status, 0}} ->
-         {ok, Data};
-      {Port, {exit_status, ExitStatus}} ->
-         {error, ExitStatus}
-    end.
     
 verbose_loop_till_done_file(File, Port) ->
     receive
       {Port, {data, NewData}} ->
          file:write_file(File, NewData),
          verbose_loop_till_done_file(File, Port);
-      {Port, {exit_status, 0}} ->
-         ok;
-      {Port, {exit_status, ExitStatus}} ->
-         {error, ExitStatus}
-    end.
-
-verbose_loop_till_done(Port) ->
-    receive
-      {Port, {data, NewData}} ->
-         lists:foreach(fun(A) -> io:format("~s~n", [A]) end,
-            string:tokens(NewData, "\n")),
-         verbose_loop_till_done(Port);
       {Port, {exit_status, 0}} ->
          ok;
       {Port, {exit_status, ExitStatus}} ->
